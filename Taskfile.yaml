@@ -1,0 +1,20 @@
+# https://taskfile.dev
+
+version: '3'
+
+dotenv:
+  - .env
+
+tasks:
+  brew:requirements:
+    cmds:
+      - |-
+        brew install \
+          benthos \
+          jq \
+          ripgrep \
+          sourcegraph/src-cli/src-cli \
+          sqlite \
+          xsv
+  src:login:
+    - src login
