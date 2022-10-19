@@ -2,11 +2,17 @@
 
 version: '3'
 
+vars:
+  DATA_DIR: ./data
+  SRC_RESULTS_JSONL: "{{.DATA_DIR}}/src_github_results.jsonl"
+  SRC_RESULTS_CSV: "{{.DATA_DIR}}/src_github_results.csv"
+
 dotenv:
   - .env
 
 tasks:
   brew:requirements:
+    desc: Install required utilities.
     cmds:
       - |-
         brew install \
@@ -16,5 +22,48 @@ tasks:
           sourcegraph/src-cli/src-cli \
           sqlite \
           xsv
+
   src:login:
-    - src login
+    desc: Test Sourcegraph CLI authentication.
+    cmds:
+      - src login
+
+  src:query:
+    desc: Query Sourcegraph for package.json files
+    summary: |
+      Query SourceGraph for package.json files.
+
+      SourceGraph query asks for all package.json files excluding files found in directories such
+      as node_modules, test, fixture, and examples. The returned results are filtered to contain
+      GitHub repositories and reformatting the repository field in the output.
+    cmds:
+      - |-
+        src search -stream -json '{{ .SRC_QUERY }}' \
+          | jq -c 'select(.type == "path") | select(.repository | test("^github.com"))' \
+          | jq -c '.repository = (.repository | sub("github.com/"; ""))' \
+          > {{ .SRC_RESULTS_JSONL }}
+    vars:
+      SRC_QUERY: >-
+        file:(^|/)package.json$
+        fork:no
+        archived:no
+        -file:(^|/)\.
+        -file:(^|/)(node_modules|test|tests|fixture|fixtures|examples|vendor)/
+        count:all
+    generates:
+      - "{{ .SRC_RESULTS_JSONL }}"
+
+  src:query:csv:
+    desc: Convert Sourcegraph query results into a CSV.
+    summary: |
+      Convert Sourcegraph query results into a CSV.
+    cmds:
+      - echo "repo,commit_sha,path" > {{ .SRC_RESULTS_CSV }}
+      - |-
+        jq -r '[.repository, .commit, .path] | @csv' {{ .SRC_RESULTS_JSONL }} \
+          | xsv fmt \
+          >> {{ .SRC_RESULTS_CSV }}
+    sources:
+      - "{{ .SRC_RESULTS_JSONL }}"
+    generates:
+      - "{{ .SRC_RESULTS_CSV }}"
