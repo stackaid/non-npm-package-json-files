@@ -1,0 +1,58 @@
+services:
+  nsqd:
+    image: nsqio/nsq
+    command: /nsqd -data-path /data -broadcast-address=nsqd -mem-queue-size 0
+    ports:
+      - "4150"
+      - "4151"
+    volumes:
+      - nsqd-data:/data
+
+  nsqadmin:
+    image: nsqio/nsq
+    command: /nsqadmin -nsqd-http-address=nsqd:4151
+    depends_on:
+      - nsqd
+    ports:
+      - "4171:4171"
+
+  # Note: This container expects that the SRC_ACCESS_TOKEN environment variable is set. Check your
+  #  .env file.
+  sourcegraph:
+    build: .
+    command: src:query meta-db github:collect:enqueue
+    env_file: ["./.env"]
+    volumes:
+      - ./data:/app/data
+      - ./npm:/app/npm
+    depends_on:
+      - nsqd
+
+  benthos:
+    image: jeffail/benthos
+    working_dir: /app
+    command:
+      - "-c"
+      - "/app/config/config.yml"
+      - "-r"
+      - "/app/config/resources.yml"
+      - "streams"
+      - "/app/streams/github.yml"
+    volumes:
+      - ./benthos:/app
+      - type: bind
+        source: ./data
+        target: /app/data
+    depends_on:
+      - nsqd
+
+  save-package-json:
+    build: .
+    command: github:collect:to-disk
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - nsqd
+
+volumes:
+  nsqd-data:
