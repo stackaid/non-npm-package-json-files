@@ -3,3 +3,5 @@
 .task
 data/*.jsonl
 data/*.csv
+data/*.log.gz
+data/*.db
