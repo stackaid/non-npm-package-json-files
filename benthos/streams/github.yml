@@ -1,0 +1,48 @@
+input:
+  label: "github_package_json_references"
+  nsq:
+    nsqd_tcp_addresses: ["nsqd:4150"]
+    topic: "package_json_references"
+    channel: "github_collector"
+    user_agent: "benthos"
+    max_in_flight: 10
+buffer:
+  none: {}
+pipeline:
+  threads: -1
+  processors:
+    - log:
+        message: "reference"
+        fields_mapping:
+          root = this
+    - branch:
+        request_map: |
+          let path = this.path.replace(" ", "%20")
+          meta url = "https://raw.githubusercontent.com/%s/%s/%s".format(this.repository, this.commit, path)
+          root = ""
+        processors:
+          - label: "github"
+            http:
+              parallel: true
+              url: '${! meta("url") }'
+              verb: GET
+              headers:
+                Content-Type: application/json
+              rate_limit: "github_limiter"
+              timeout: 5s
+              retry_period: 1s
+              max_retry_backoff: 30s
+              retries: 2
+              backoff_on:
+                - 429
+              drop_on: [404]
+        result_map: |
+          root = if errored() { deleted() }
+          root.contents = this
+    - mapping: root = if errored() { deleted() }
+output:
+  label: "package_jsons"
+  nsq:
+    nsqd_tcp_address: "nsqd:4150"
+    topic: package_json
+    user_agent: "benthos"
