@@ -6,6 +6,10 @@ vars:
   DATA_DIR: ./data
   SRC_RESULTS_JSONL: "{{.DATA_DIR}}/src_github_results.jsonl"
   SRC_RESULTS_CSV: "{{.DATA_DIR}}/src_github_results.csv"
+  NON_NPM_SRC_RESULTS_JSONL: "{{.DATA_DIR}}/non_npm_src_github_results.jsonl"
+  NSQD_HOST: nsqd
+  IN_PROGRESS_DB: ./data/working.db
+  FINAL_DB: ./data/packages.db
 
 dotenv:
   - .env
@@ -53,17 +57,111 @@ tasks:
     generates:
       - "{{ .SRC_RESULTS_JSONL }}"
 
-  src:query:csv:
-    desc: Convert Sourcegraph query results into a CSV.
-    summary: |
-      Convert Sourcegraph query results into a CSV.
+  meta-db:create-tables:
     cmds:
-      - echo "repo,commit_sha,path" > {{ .SRC_RESULTS_CSV }}
-      - |-
-        jq -r '[.repository, .commit, .path] | @csv' {{ .SRC_RESULTS_JSONL }} \
-          | xsv fmt \
-          >> {{ .SRC_RESULTS_CSV }}
-    sources:
-      - "{{ .SRC_RESULTS_JSONL }}"
-    generates:
-      - "{{ .SRC_RESULTS_CSV }}"
+      - |
+        sqlite-utils create-table --replace {{ .IN_PROGRESS_DB }} npm_package_repositories \
+          full_name text \
+          --not-null full_name \
+          --pk=full_name
+      - |
+        sqlite-utils create-table --replace {{ .IN_PROGRESS_DB }} src_results \
+          repository text \
+          path text \
+          commit text \
+          organization text \
+          --not-null repository \
+          --not-null path \
+          --not-null commit \
+          --not-null organization \
+          --pk=repository \
+          --pk=path \
+          --pk=commit
+
+  meta-db:insert:npm_package_repositories:
+    cmds:
+      - |
+        sqlite-utils insert --replace {{ .IN_PROGRESS_DB }} npm_package_repositories \
+          --csv ./npm/npm_package_github_repos.csv
+
+  meta-db:insert:src_results:
+    cmds:
+      - |
+        cat {{ .SRC_RESULTS_JSONL }} \
+          | jq -c '{path: .path, commit: .commit, repository: .repository, organization: (.repository / "/" | .[0])}' \
+          | sqlite-utils insert --replace {{ .IN_PROGRESS_DB }}  src_results - --nl
+
+  meta-db:query:non-npm-packages:
+    cmds:
+      - |
+        sqlite-utils {{ .IN_PROGRESS_DB }} "{{ .QUERY }}" --nl \
+          > {{ .NON_NPM_SRC_RESULTS_JSONL }}
+    vars:
+      QUERY: >
+        SELECT
+          s.*
+        FROM
+          src_results AS s
+          LEFT JOIN npm_package_repositories AS r ON (s.repository = r.full_name)
+        WHERE
+          r.full_name IS NULL
+        ORDER BY
+          s.organization
+
+  meta-db:
+    cmds:
+      - task: meta-db:create-tables
+      - task: meta-db:insert:npm_package_repositories
+      - task: meta-db:insert:src_results
+      - task: meta-db:query:non-npm-packages
+
+  github:collect:enqueue:
+    desc: Enqueue package.json references into NSQ
+    cmds:
+      - |
+        cat {{ .NON_NPM_SRC_RESULTS_JSONL }} \
+          | to_nsq -nsqd-tcp-address={{ .NSQD_HOST }}:4150 -topic=package_json_references
+
+  github:collect:
+    desc: Consume package.json references and produce package.json files
+    cmds:
+      - |
+        benthos \
+          -c ./benthos/config/config.yml \
+          -r ./benthos/config/resources.yml \
+          streams \
+          ./benthos/streams/github.yml
+
+  github:collect:to-disk:
+    desc: Persist enqueued package.json files to disk
+    cmds:
+      - |
+        nsq_to_file \
+          -topic=package_json \
+          -channel=to_file \
+          -nsqd-tcp-address={{ .NSQD_HOST }}:4150 \
+          -gzip \
+          -output-dir=./data
+
+  db:insert-npm-repositories:
+    desc: Insert NPM package repositories
+    cmds:
+      - |
+        sqlite-utils insert \
+          --replace \
+          --pk=full_name \
+          {{ .FINAL_DB }} \
+          npm_package_repositories \
+          --csv ./npm/npm_package_github_repos.csv
+  db:insert-packages:
+    desc: Insert non-NPM packages into SQLite DB
+    cmds:
+      - |
+        gzcat {{ .DATA_DIR }}/package_json.*.log.gz \
+        | sqlite-utils insert \
+            --nl \
+            --pk=repository \
+            --pk=path \
+            {{ .FINAL_DB }} \
+            non_npm_packages \
+            -
